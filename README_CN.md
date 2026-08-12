@@ -90,7 +90,7 @@ python -c "import torch, onnxruntime; print('cuda=', torch.cuda.is_available(), 
 
 ```powershell
 conda activate demo
-Set-Location E:\demo\positioning_robots
+Set-Location C:\Users\SLAI\v1zhang\positioning_robots
 Remove-Item Env:\LOCATOR_DEMO_SIM -ErrorAction SilentlyContinue
 $env:LOCATOR_DEMO_PORT="8010"
 python run_server.py

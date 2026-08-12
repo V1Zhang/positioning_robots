@@ -463,6 +463,10 @@ async function saveAudioConfig() {
       speech_confidence_threshold: Number($("speech-threshold-input").value || 0.15),
       doa_confidence_threshold: Number($("doa-threshold-input").value || 0.05),
       required_audio_hits: Number($("audio-hits-input").value || 1),
+      denoise_enabled: true,
+      denoise_dry_mix: 0.15,
+      denoise_output_dir: "denoise_output",
+      recording_enabled: true,
     }),
   });
   applyProcessingConfig(audioProcessing.audio_processing || audioProcessing, null);

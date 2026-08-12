@@ -168,6 +168,10 @@ class AudioProcessingConfig:
     speech_confidence_threshold: float = 0.15
     doa_confidence_threshold: float = 0.05
     required_audio_hits: int = 1
+    denoise_enabled: bool = True
+    denoise_dry_mix: float = 0.15
+    denoise_output_dir: str | None = None
+    recording_enabled: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -185,11 +189,27 @@ class AudioProcessingConfig:
             "doa_confidence_threshold",
             _threshold_value(self.doa_confidence_threshold, 0.05),
         )
-        try:
-            hits = int(self.required_audio_hits)
-        except Exception:
-            hits = 1
-        object.__setattr__(self, "required_audio_hits", max(1, min(5, hits)))
+        object.__setattr__(
+            self,
+            "required_audio_hits",
+            max(1, min(5, int(self.required_audio_hits))),
+        )
+        object.__setattr__(
+            self,
+            "denoise_enabled",
+            bool(self.denoise_enabled),
+        )
+        object.__setattr__(
+            self,
+            "denoise_dry_mix",
+            _threshold_value(self.denoise_dry_mix, 0.15),
+        )
+        denoise_output_dir = str(self.denoise_output_dir).strip() if self.denoise_output_dir else None
+        object.__setattr__(
+            self,
+            "denoise_output_dir",
+            denoise_output_dir,
+        )
 
 
 @dataclass(frozen=True)
@@ -383,6 +403,10 @@ def load_settings(path: Path | str | None) -> SavedSettings:
             speech_confidence_threshold=float(audio_data.get("speech_confidence_threshold", 0.15)),
             doa_confidence_threshold=float(audio_data.get("doa_confidence_threshold", 0.05)),
             required_audio_hits=int(audio_data.get("required_audio_hits", 1)),
+            denoise_enabled=bool(audio_data.get("denoise_enabled", False)),
+            denoise_dry_mix=float(audio_data.get("denoise_dry_mix", 0.15)),
+            denoise_output_dir=(audio_data.get("denoise_output_dir") or None),
+            recording_enabled=bool(audio_data.get("recording_enabled", True)),
         ),
         vision=VisionProcessingConfig(
             active_speaker_enabled=bool(vision_data.get("active_speaker_enabled", True)),

@@ -1,8 +1,10 @@
-import unittest
 import math
 import struct
+import tempfile
+import unittest
+from pathlib import Path
 
-from locator_demo.audio import AudioDirection
+from locator_demo.audio import AudioDirection, classify_audio_direction
 from locator_demo.audio_device import FfmpegAudioLocalizer
 
 
@@ -28,6 +30,38 @@ class AudioDeviceTests(unittest.TestCase):
         estimate = localizer.read_estimate()
 
         self.assertEqual(estimate.direction, AudioDirection.UNKNOWN)
+
+    def test_runtime_audio_is_buffered_and_saved_on_stop_without_denoise(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            class FakeStdout:
+                def __init__(self):
+                    self._yielded = False
+
+                def read(self, _size):
+                    if self._yielded:
+                        return b""
+                    self._yielded = True
+                    return b"\x00\x01\x00\x01" * 40
+
+            class FakeProcessWithStdout:
+                def __init__(self, stdout):
+                    self.stdout = stdout
+                    self.stderr = None
+                    self._poll_count = 0
+
+                def poll(self):
+                    self._poll_count += 1
+                    return 0 if self._poll_count > 1 else None
+
+            localizer = FfmpegAudioLocalizer(denoise=False, denoise_output_dir=tmpdir, recording_enabled=True)
+            localizer._process = FakeProcessWithStdout(FakeStdout())
+
+            localizer._read_loop()
+            localizer.stop()
+
+            files = sorted(Path(tmpdir).glob("*.wav"))
+            self.assertEqual(1, len(files))
+            self.assertGreater(files[0].stat().st_size, 0)
 
     def test_channel_level_bias_detects_close_side_speech(self):
         localizer = FfmpegAudioLocalizer()
@@ -73,6 +107,24 @@ class AudioDeviceTests(unittest.TestCase):
         self.assertEqual(estimate.direction, AudioDirection.LEFT)
         self.assertGreater(estimate.azimuth_deg, 0.0)
         self.assertGreater(estimate.doa_confidence, 0.12)
+
+    def test_single_wav_is_written_when_speech_is_located(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            localizer = FfmpegAudioLocalizer(denoise_output_dir=tmpdir, recording_enabled=True)
+            estimate = classify_audio_direction(
+                0.00035,
+                0.8,
+                min_energy=0.08,
+                speech_confidence=0.8,
+                doa_confidence=0.9,
+                noise_state="voiced_speech",
+            )
+
+            localizer._append_recording_chunk(b"\x01\x02" * 160, estimate)
+
+            files = sorted(Path(tmpdir).glob("*.wav"))
+            self.assertEqual(1, len(files))
+            self.assertGreater(files[0].stat().st_size, 0)
 
 
 if __name__ == "__main__":

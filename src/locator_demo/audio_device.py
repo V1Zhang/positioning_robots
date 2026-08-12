@@ -7,9 +7,11 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Callable
+from pathlib import Path
+from typing import Any, Callable
 
-from .audio import AudioDirectionSmoother, AudioEstimate, classify_audio_direction, rms, srp_phat_front_hemisphere
+from .audio import AudioDirection, AudioDirectionSmoother, AudioEstimate, classify_audio_direction, rms, srp_phat_front_hemisphere
+from .audio_denoise import DeepFilterNetStereoDenoiser, save_pcm16_stereo_to_wav
 from .devices import choose_dshow_device
 
 
@@ -41,6 +43,10 @@ class FfmpegAudioLocalizer:
         sample_rate: int = 16000,
         frame_ms: int = 40,
         ffmpeg: str = "ffmpeg",
+        denoise: bool = False,
+        denoise_dry_mix: float = 0.15,
+        denoise_output_dir: str | None = None,
+        recording_enabled: bool = True,
     ):
         self.requested_device_name = device_name
         self.device_name = device_name or ""
@@ -53,10 +59,25 @@ class FfmpegAudioLocalizer:
         self._reader: threading.Thread | None = None
         self._smoother = AudioDirectionSmoother(window_size=4, min_samples=2)
         self._latest_estimate = classify_audio_direction(0.0, 0.0)
+        self._latest_raw_estimate = classify_audio_direction(0.0, 0.0)
+        self._latest_denoised_estimate = classify_audio_direction(0.0, 0.0)
         self._latest_frame_time = 0.0
         self._noise_floor = 0.03
         history_frames = max(1, int(math.ceil(3.5 * 1000.0 / max(1, self.frame_ms))))
         self._recent_raw: deque[tuple[float, bytes]] = deque(maxlen=history_frames)
+        self._denoise_enabled = bool(denoise)
+        self._denoise_dry_mix = float(denoise_dry_mix)
+        self._denoise_output_dir = Path(denoise_output_dir) if denoise_output_dir else None
+        self._denoiser: DeepFilterNetStereoDenoiser | None = None
+        self._denoise_counter = 0
+        self._denoise_speech_threshold = 0.35
+        self._denoise_energy_threshold = 0.08
+        self._recording_enabled = bool(recording_enabled)
+        self._recording_chunks: list[bytes] = []
+        self._recording_denoised_chunks: list[bytes] = []
+        self._recording_output_path: Path | None = None
+        self._recording_denoised_output_path: Path | None = None
+        self._recording_session_stamp: str | None = None
 
     def _resolve_device_name(self) -> str | None:
         if self.device_name:
@@ -202,12 +223,64 @@ class FfmpegAudioLocalizer:
                 self._consume_stderr_if_exited()
                 time.sleep(0.02)
                 continue
-            estimate = self._smoother.update(self._estimate_from_raw(raw))
+            raw_estimate = self._estimate_from_raw(raw)
+            if self._denoise_enabled:
+                self._ensure_denoiser()
+                if self._denoiser is not None:
+                    try:
+                        result = self._denoiser.process_pcm16(raw, sample_rate=self.sample_rate)
+                        raw_denoised = result.pcm16_stereo
+                    except Exception as exc:
+                        raw_denoised = raw
+                        self._latest_error = f"denoise error: {exc}"
+                else:
+                    raw_denoised = raw
+            else:
+                raw_denoised = raw
+            denoised_estimate = self._estimate_from_raw(raw_denoised)
+            estimate = self._smoother.update(raw_estimate)
+            if self._denoise_output_dir is not None and self._recording_enabled:
+                self._append_recording_chunk(raw, estimate)
+                self._append_recording_chunk(raw_denoised, estimate, denoised=True)
             with self._lock:
-                self._recent_raw.append((time.time(), raw))
+                self._recent_raw.append((time.time(), raw_denoised))
                 self._latest_estimate = estimate
+                self._latest_raw_estimate = raw_estimate
+                self._latest_denoised_estimate = denoised_estimate
                 self._latest_frame_time = time.time()
                 self._latest_error = "running"
+
+    def _ensure_denoiser(self) -> None:
+        if self._denoiser is not None:
+            return
+        try:
+            self._denoiser = DeepFilterNetStereoDenoiser(dry_mix=self._denoise_dry_mix)
+        except Exception as exc:
+            self._denoiser = None
+            self._latest_error = f"denoise init error: {exc}"
+
+    def set_recording_enabled(self, enabled: bool) -> None:
+        self._recording_enabled = bool(enabled)
+
+    def _append_recording_chunk(self, chunk: bytes, estimate: AudioEstimate, *, denoised: bool = False) -> None:
+        if self._denoise_output_dir is None or not self._recording_enabled:
+            return
+        if self._recording_session_stamp is None:
+            self._recording_session_stamp = time.strftime("%Y%m%d_%H%M%S")
+        if denoised:
+            if self._recording_denoised_output_path is None:
+                self._denoise_output_dir.mkdir(parents=True, exist_ok=True)
+                self._recording_denoised_output_path = (
+                    self._denoise_output_dir / f"speech_capture_{self._recording_session_stamp}.wav"
+                )
+            self._recording_denoised_chunks.append(chunk)
+            return
+        if self._recording_output_path is None:
+            self._denoise_output_dir.mkdir(parents=True, exist_ok=True)
+            self._recording_output_path = (
+                self._denoise_output_dir / f"speech_capture_raw_{self._recording_session_stamp}.wav"
+            )
+        self._recording_chunks.append(chunk)
 
     def stop(self) -> None:
         if self._process is not None:
@@ -217,6 +290,27 @@ class FfmpegAudioLocalizer:
             except subprocess.TimeoutExpired:
                 self._process.kill()
         self._process = None
+        if self._recording_output_path is not None and self._recording_chunks:
+            try:
+                save_pcm16_stereo_to_wav(self._recording_output_path, b"".join(self._recording_chunks), self.sample_rate)
+                print(f"[denoise] wrote raw audio to {self._recording_output_path}")
+            except Exception as exc:
+                print(f"[denoise] write failed: {exc}")
+            self._recording_chunks.clear()
+            self._recording_output_path = None
+        if self._recording_denoised_output_path is not None and self._recording_denoised_chunks:
+            try:
+                save_pcm16_stereo_to_wav(
+                    self._recording_denoised_output_path,
+                    b"".join(self._recording_denoised_chunks),
+                    self.sample_rate,
+                )
+                print(f"[denoise] wrote denoised audio to {self._recording_denoised_output_path}")
+            except Exception as exc:
+                print(f"[denoise] denoised write failed: {exc}")
+            self._recording_denoised_chunks.clear()
+            self._recording_denoised_output_path = None
+        self._recording_session_stamp = None
 
     def status(self) -> AudioDeviceStatus:
         running = self._process is not None and self._process.poll() is None
@@ -230,6 +324,34 @@ class FfmpegAudioLocalizer:
             if self._process is None:
                 return classify_audio_direction(0.0, 0.0)
             return self._latest_estimate
+
+    @staticmethod
+    def _estimate_to_dict(estimate: AudioEstimate) -> dict[str, Any]:
+        return {
+            "direction": estimate.direction.value,
+            "confidence": round(estimate.confidence, 3),
+            "speech_confidence": round(estimate.speech_confidence, 3),
+            "doa_confidence": round(estimate.doa_confidence, 3),
+            "energy": round(estimate.energy, 3),
+            "azimuth_deg": round(estimate.azimuth_deg, 2),
+        }
+
+    def comparison_metrics(self) -> dict[str, Any]:
+        with self._lock:
+            raw_est = self._latest_raw_estimate
+            denoised_est = self._latest_denoised_estimate
+            using = "denoised" if self._denoise_enabled else "raw"
+        return {
+            "using_for_downstream": "raw",
+            "raw": self._estimate_to_dict(raw_est),
+            "denoised": self._estimate_to_dict(denoised_est),
+            "delta": {
+                "confidence": round(denoised_est.confidence - raw_est.confidence, 3),
+                "speech_confidence": round(denoised_est.speech_confidence - raw_est.speech_confidence, 3),
+                "doa_confidence": round(denoised_est.doa_confidence - raw_est.doa_confidence, 3),
+                "energy": round(denoised_est.energy - raw_est.energy, 3),
+            },
+        }
 
     def recent_mono_audio(self, *, seconds: float = 2.0) -> tuple[int, list[float]]:
         cutoff = time.time() - max(0.1, float(seconds))

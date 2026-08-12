@@ -138,6 +138,10 @@ class AudioProcessingConfigRequest(BaseModel):
     speech_confidence_threshold: float = Field(0.15, ge=0.0, le=1.0)
     doa_confidence_threshold: float = Field(0.05, ge=0.0, le=1.0)
     required_audio_hits: int = Field(1, ge=1, le=5)
+    denoise_enabled: bool = False
+    denoise_dry_mix: float = Field(0.15, ge=0.0, le=1.0)
+    denoise_output_dir: str | None = None
+    recording_enabled: bool = True
 
 
 class VisionProcessingConfigRequest(BaseModel):
@@ -236,7 +240,15 @@ class DemoRuntime:
         self.logic = self._make_logic()
         self.bus = SimulatedBus() if config.simulated else ZPServoBus(config.port)
         self.head = self._make_head()
-        self.audio = SimulatedAudioLocalizer() if config.simulated else FfmpegAudioLocalizer()
+        self.audio = (
+            SimulatedAudioLocalizer()
+            if config.simulated
+            else FfmpegAudioLocalizer(
+                denoise=self.audio_processing.denoise_enabled,
+                denoise_dry_mix=self.audio_processing.denoise_dry_mix,
+                denoise_output_dir=self.audio_processing.denoise_output_dir,
+            )
+        )
         self.vision = self._make_vision()
         self.state_machine = self._make_state_machine()
         self.running = False
@@ -310,29 +322,43 @@ class DemoRuntime:
                 "reframe_move_time_ms": 450,
             }
         return {
-            "motion_interval_s": 0.35,
-            "yaw_deadband": 0.08,
-            "pitch_deadband": 0.12,
+            "motion_interval_s": 0.22,
+            "yaw_deadband": 0.06,
+            "pitch_deadband": 0.10,
             "max_yaw_delta": 120,
             "max_pitch_delta": 30,
-            "visual_yaw_small_deadband": 0.20,
-            "visual_yaw_small_max_delta": 25,
-            "ema_alpha": 0.35,
-            "move_time_ms": 700,
-            "audio_seek_move_time_ms": 350,
-            "audio_seek_window": 260,
-            "audio_seek_max_step": 150,
+            "visual_yaw_small_deadband": 0.18,
+            "visual_yaw_small_max_delta": 30,
+            "ema_alpha": 0.50,
+            "move_time_ms": 500,
+            "audio_seek_move_time_ms": 250,
+            "audio_seek_window": 280,
+            "audio_seek_max_step": 160,
             "audio_seek_min_step": 60,
             "audio_seek_full_scale_deg": 45.0,
-            "audio_deadband_deg": 9.0,
+            "audio_deadband_deg": 7.0,
             "audio_seek_max_steps": 3,
             "audio_seek_timeout_s": 2.0,
-            "reframe_interval_s": 0.45,
-            "reframe_timeout_s": 3.0,
+            "reframe_interval_s": 0.35,
+            "reframe_timeout_s": 2.5,
             "reframe_yaw_micro_step": 30,
             "reframe_pitch_steps": [0, 40, -40, 75, 0],
-            "reframe_move_time_ms": 550,
+            "reframe_move_time_ms": 420,
         }
+
+    def stop(self) -> None:
+        try:
+            self.audio.stop()
+        except Exception:
+            pass
+        try:
+            self.vision.stop()
+        except Exception:
+            pass
+        try:
+            self.bus.close()
+        except Exception:
+            pass
 
     def _visual_control_params(self, params: dict[str, Any]) -> dict[str, Any]:
         visual_yaw_mode = self.vision_processing.visual_yaw_mode
@@ -944,6 +970,10 @@ class DemoRuntime:
             speech_confidence_threshold=payload.speech_confidence_threshold,
             doa_confidence_threshold=payload.doa_confidence_threshold,
             required_audio_hits=payload.required_audio_hits,
+            denoise_enabled=payload.denoise_enabled,
+            denoise_dry_mix=payload.denoise_dry_mix,
+            denoise_output_dir=payload.denoise_output_dir or "denoise_output",
+            recording_enabled=True,
         )
         self.state_machine = self._make_state_machine()
         self._persist_settings()
@@ -988,6 +1018,7 @@ class DemoRuntime:
 
     def snapshot(self, *, include_frame: bool = True) -> dict[str, Any]:
         mode = DemoMode.REFRAME_VISUAL.value if self._reframe_active else self.last_state.mode.value
+        audio_comparison = self.audio.comparison_metrics() if hasattr(self.audio, "comparison_metrics") else None
         return {
             "running": self.running,
             "mode": mode,
@@ -1017,6 +1048,7 @@ class DemoRuntime:
                 "peak_ratio": round(self.last_audio.peak_ratio, 3),
                 "noise_state": self.last_audio.noise_state,
                 "motor_suppressed": self.last_audio.motor_suppressed,
+                "comparison": audio_comparison,
                 "processing": asdict(self.audio_processing),
                 "status": asdict(self.audio.status()),
             },
@@ -1536,6 +1568,10 @@ def create_app(*, simulated: bool = False, settings_path: Path | None = None) ->
     runtime = DemoRuntime(RuntimeConfig(simulated=simulated, settings_path=settings_path))
     static_dir = Path(__file__).resolve().parent / "static"
     app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+    @app.on_event("shutdown")
+    async def shutdown_event() -> None:
+        runtime.stop()
 
     @app.get("/", response_class=HTMLResponse)
     async def root():

@@ -168,10 +168,11 @@ class AudioProcessingConfig:
     speech_confidence_threshold: float = 0.15
     doa_confidence_threshold: float = 0.05
     required_audio_hits: int = 1
-    denoise_enabled: bool = True
+    denoise_enabled: bool = False
     denoise_dry_mix: float = 0.15
     denoise_output_dir: str | None = None
     recording_enabled: bool = True
+    use_denoised_for_localization: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -198,6 +199,11 @@ class AudioProcessingConfig:
             self,
             "denoise_enabled",
             bool(self.denoise_enabled),
+        )
+        object.__setattr__(
+            self,
+            "use_denoised_for_localization",
+            bool(self.use_denoised_for_localization),
         )
         object.__setattr__(
             self,
@@ -407,6 +413,7 @@ def load_settings(path: Path | str | None) -> SavedSettings:
             denoise_dry_mix=float(audio_data.get("denoise_dry_mix", 0.15)),
             denoise_output_dir=(audio_data.get("denoise_output_dir") or None),
             recording_enabled=bool(audio_data.get("recording_enabled", True)),
+            use_denoised_for_localization=bool(audio_data.get("use_denoised_for_localization", False)),
         ),
         vision=VisionProcessingConfig(
             active_speaker_enabled=bool(vision_data.get("active_speaker_enabled", True)),

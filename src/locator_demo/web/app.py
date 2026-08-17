@@ -142,6 +142,7 @@ class AudioProcessingConfigRequest(BaseModel):
     denoise_dry_mix: float = Field(0.15, ge=0.0, le=1.0)
     denoise_output_dir: str | None = None
     recording_enabled: bool = True
+    use_denoised_for_localization: bool = False
 
 
 class VisionProcessingConfigRequest(BaseModel):
@@ -247,6 +248,7 @@ class DemoRuntime:
                 denoise=self.audio_processing.denoise_enabled,
                 denoise_dry_mix=self.audio_processing.denoise_dry_mix,
                 denoise_output_dir=self.audio_processing.denoise_output_dir,
+                use_denoised_for_localization=self.audio_processing.use_denoised_for_localization,
             )
         )
         self.vision = self._make_vision()
@@ -974,6 +976,7 @@ class DemoRuntime:
             denoise_dry_mix=payload.denoise_dry_mix,
             denoise_output_dir=payload.denoise_output_dir or "denoise_output",
             recording_enabled=True,
+            use_denoised_for_localization=payload.use_denoised_for_localization,
         )
         self.state_machine = self._make_state_machine()
         self._persist_settings()

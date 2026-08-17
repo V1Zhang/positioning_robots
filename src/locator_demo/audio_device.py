@@ -47,6 +47,7 @@ class FfmpegAudioLocalizer:
         denoise_dry_mix: float = 0.15,
         denoise_output_dir: str | None = None,
         recording_enabled: bool = True,
+        use_denoised_for_localization: bool = False,
     ):
         self.requested_device_name = device_name
         self.device_name = device_name or ""
@@ -66,12 +67,14 @@ class FfmpegAudioLocalizer:
         history_frames = max(1, int(math.ceil(3.5 * 1000.0 / max(1, self.frame_ms))))
         self._recent_raw: deque[tuple[float, bytes]] = deque(maxlen=history_frames)
         self._denoise_enabled = bool(denoise)
+        self._use_denoised_for_localization = bool(use_denoised_for_localization)
         self._denoise_dry_mix = float(denoise_dry_mix)
         self._denoise_output_dir = Path(denoise_output_dir) if denoise_output_dir else None
         self._denoiser: DeepFilterNetStereoDenoiser | None = None
         self._denoise_counter = 0
         self._denoise_speech_threshold = 0.35
         self._denoise_energy_threshold = 0.08
+        self._human_voice_streak = 0
         self._recording_enabled = bool(recording_enabled)
         self._recording_chunks: list[bytes] = []
         self._recording_denoised_chunks: list[bytes] = []
@@ -211,6 +214,43 @@ class FfmpegAudioLocalizer:
             azimuth_deg=srp.azimuth_deg,
         )
 
+    def _human_voice_double_check(self, raw_estimate: AudioEstimate, denoised_estimate: AudioEstimate) -> AudioEstimate:
+        candidate = denoised_estimate if self._denoise_enabled and self._use_denoised_for_localization else raw_estimate
+        stable_human = (
+            candidate.noise_state == "voiced_speech"
+            and candidate.direction != AudioDirection.UNKNOWN
+            and candidate.speech_confidence >= 0.55
+            and candidate.energy >= 0.10
+        )
+
+        if stable_human:
+            self._human_voice_streak += 1
+        else:
+            self._human_voice_streak = 0
+
+        if self._human_voice_streak >= 2:
+            print(
+                f"[VOICE_DECISION] status=HUMAN_VOICE streak={self._human_voice_streak} "
+                f"direction={candidate.direction.value} speech={candidate.speech_confidence:.3f} "
+                f"energy={candidate.energy:.3f} noise_state={candidate.noise_state} "
+                f"azimuth={candidate.azimuth_deg:.1f}deg"
+            )
+            return candidate
+
+        print(
+            f"[VOICE_DECISION] status=NON_HUMAN streak={self._human_voice_streak} reason={candidate.noise_state or 'unknown'} "
+            f"direction={candidate.direction.value} speech={candidate.speech_confidence:.3f} "
+            f"energy={candidate.energy:.3f} raw_state={raw_estimate.noise_state} denoised_state={denoised_estimate.noise_state}"
+        )
+        return classify_audio_direction(
+            0.0,
+            0.0,
+            min_energy=0.06,
+            speech_confidence=0.0,
+            doa_confidence=0.0,
+            noise_state="noise",
+        )
+
     def _read_loop(self) -> None:
         process = self._process
         if process is None or process.stdout is None:
@@ -238,7 +278,8 @@ class FfmpegAudioLocalizer:
             else:
                 raw_denoised = raw
             denoised_estimate = self._estimate_from_raw(raw_denoised)
-            estimate = self._smoother.update(raw_estimate)
+            downstream_estimate = self._human_voice_double_check(raw_estimate, denoised_estimate)
+            estimate = self._smoother.update(downstream_estimate)
             if self._denoise_output_dir is not None and self._recording_enabled:
                 self._append_recording_chunk(raw, estimate)
                 self._append_recording_chunk(raw_denoised, estimate, denoised=True)
@@ -342,7 +383,7 @@ class FfmpegAudioLocalizer:
             denoised_est = self._latest_denoised_estimate
             using = "denoised" if self._denoise_enabled else "raw"
         return {
-            "using_for_downstream": "raw",
+            "using_for_downstream": using,
             "raw": self._estimate_to_dict(raw_est),
             "denoised": self._estimate_to_dict(denoised_est),
             "delta": {

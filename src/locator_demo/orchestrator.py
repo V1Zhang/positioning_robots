@@ -76,6 +76,8 @@ class LocatorStateMachine:
             return False
         if audio.direction == AudioDirection.UNKNOWN:
             return False
+        if audio.noise_state in {"noise", "quiet", "fan_or_motor", "low_band_noise", "denoise_guard"}:
+            return False
         if audio.confidence < self.audio_confidence_threshold:
             return False
         speech_confidence = audio.speech_confidence if audio.speech_confidence > 0 else audio.confidence

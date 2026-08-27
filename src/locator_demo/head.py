@@ -109,7 +109,7 @@ class HeadControllerLogic:
         yaw_delta = (
             0
             if abs(error_x) <= yaw_band
-            else round(-self.direction.yaw_left_sign * error_x * self.yaw.step_per_unit_error)
+            else round(self.direction.yaw_left_sign * error_x * self.yaw.step_per_unit_error)
         )
         pitch_delta = (
             0

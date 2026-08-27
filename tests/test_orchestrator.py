@@ -178,7 +178,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(state.mode, DemoMode.TRACK_SPEAKER)
         self.assertTrue(state.target_confirmed)
 
-    def test_visual_target_without_recent_audio_does_not_lock(self):
+    def test_visual_target_without_recent_audio_still_locks_for_visual_tracking(self):
         sm = LocatorStateMachine()
 
         state = sm.update(
@@ -195,8 +195,8 @@ class OrchestratorTests(unittest.TestCase):
             now_s=1.0,
         )
 
-        self.assertNotEqual(state.mode, DemoMode.TRACK_SPEAKER)
-        self.assertFalse(state.target_confirmed)
+        self.assertEqual(state.mode, DemoMode.TRACK_SPEAKER)
+        self.assertTrue(state.target_confirmed)
 
 
 if __name__ == "__main__":

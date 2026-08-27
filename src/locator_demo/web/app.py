@@ -501,7 +501,11 @@ class DemoRuntime:
         )
         mouth_gate = max(0.03, self.vision_processing.mouth_evidence_threshold * 0.5)
         active_score = float(getattr(target, "active_speaker_score", 0.0))
-        return mouth_evidence >= mouth_gate or active_score > self.vision_processing.visual_speaker_threshold + 0.02
+        face_height_ratio = float(getattr(target, "face_height_ratio", 0.0))
+        if face_height_ratio <= 0.0 and self.last_frame_height > 0:
+            face_height_ratio = max(0.0, float(target.y2 - target.y1) / float(self.last_frame_height))
+        size_evidence = face_height_ratio >= 0.12 or float(getattr(target, "area", 0.0)) >= 8000.0
+        return mouth_evidence >= mouth_gate or active_score > self.vision_processing.visual_speaker_threshold + 0.02 or size_evidence
 
     def _reset_speaker_lock(self) -> None:
         self.locked_speaker_id = None
@@ -605,11 +609,62 @@ class DemoRuntime:
                     backend=backend_status.actual,
                 )
             )
+        if annotated:
+            winner = max(
+                annotated,
+                key=lambda t: (
+                    float((t.x2 - t.x1) * (t.y2 - t.y1)),
+                    float(t.score),
+                    float(t.face_height_ratio),
+                    float(t.area),
+                ),
+                default=None,
+            )
+            if winner is not None:
+                annotated = [
+                    replace(
+                        t,
+                        active_candidate=False,
+                        locked=(t.face_id == winner.face_id),
+                        specific_speaker=(t.face_id == winner.face_id),
+                    )
+                    for t in annotated
+                ]
+            else:
+                annotated = [replace(t, active_candidate=False, locked=False, specific_speaker=False) for t in annotated]
         return annotated
 
     def _select_crowded_target(self, targets: list[FaceTarget], now_s: float) -> tuple[FaceTarget | None, DemoState]:
         threshold = self._effective_asd_threshold()
         audio_ready = self.state_machine._audio_is_ready(self.last_audio) if self.features.audio_enabled else False
+        if targets:
+            visual_winner = max(
+                targets,
+                key=lambda target: ((target.x2 - target.x1) * (target.y2 - target.y1), target.score, target.face_height_ratio),
+            )
+            marked_targets = []
+            for target in targets:
+                is_selected = target.face_id == visual_winner.face_id
+                marked_targets.append(
+                    replace(
+                        target,
+                        active_candidate=False,
+                        locked=is_selected,
+                        specific_speaker=is_selected,
+                    )
+                )
+            self.last_targets = marked_targets
+            self.last_target = visual_winner
+            self.audio_search_allowed = bool(self.vision_processing.audio_interrupt_enabled)
+            return visual_winner, DemoState(
+                DemoMode.SPEAKER_LOCKED,
+                audio_direction=self.last_audio.direction.value,
+                visual_locked=True,
+                target_label=visual_winner.label,
+                last_event="visual_target_locked",
+                audio_ready=audio_ready,
+                target_confirmed=True,
+            )
         near_targets = [target for target in targets if target.near_candidate]
         active_targets = [target for target in near_targets if target.active_candidate]
         locked_target = None
@@ -740,9 +795,9 @@ class DemoRuntime:
         if direction != self._pitch_error_direction:
             self._pitch_error_direction = direction
             self._pitch_error_hits = 1
-            return 0.0
+            return error_y
         self._pitch_error_hits += 1
-        return error_y if self._pitch_error_hits >= 2 else 0.0
+        return error_y if self._pitch_error_hits >= 1 else 0.0
 
     def _make_logic(self) -> HeadControllerLogic:
         return HeadControllerLogic(
@@ -1451,7 +1506,12 @@ class DemoRuntime:
                 if self.last_state.mode == DemoMode.AUDIO_SEARCH
                 else (1 if visual_reframe_available else audio_seek_step_limit)
             )
-            if self.features.audio_enabled and self.audio_search_allowed and audio_seek_ready:
+            if (
+                self.features.audio_enabled
+                and self.audio_search_allowed
+                and audio_seek_ready
+                and not self.last_state.target_confirmed
+            ):
                 self._smoothed_error = None
                 direction_changed = (
                     visual_reframe_available
@@ -1480,13 +1540,18 @@ class DemoRuntime:
                 if should_move and self._last_audio_seek_abs_azimuth is not None and self._audio_seek_steps > 0:
                     same_direction = audio_seek_direction == self._last_audio_seek_direction
                     diverged = same_direction and audio_seek_abs_azimuth > self._last_audio_seek_abs_azimuth + 6.0
+                    same_direction_repeat = (
+                        same_direction
+                        and abs(audio_seek_abs_azimuth - self._last_audio_seek_abs_azimuth) < 6.0
+                        and self._audio_seek_steps >= 1
+                    )
                     crossed_center = (
                         not same_direction
                         and self._last_audio_seek_direction in ("left", "right")
                         and audio_seek_direction in ("left", "right")
                         and audio_seek_abs_azimuth <= float(params["audio_deadband_deg"]) * 1.5
                     )
-                    should_move = not diverged and not crossed_center
+                    should_move = not diverged and not crossed_center and not same_direction_repeat
                 if should_move:
                     window = int(params["audio_seek_window"])
                     seek_min_yaw = self._audio_seek_origin_yaw - window
@@ -1511,9 +1576,16 @@ class DemoRuntime:
             elif self.last_state.mode == DemoMode.LISTENING:
                 self._reset_audio_seek()
                 self._reset_reframe()
+            if self.last_state.target_confirmed:
+                self._reset_audio_seek()
+                self._reset_reframe()
             audio_recent_for_reframe = (
                 self._last_reframe_audio_s > 0
                 and now - self._last_reframe_audio_s <= float(params["reframe_timeout_s"])
+            )
+            yaw_aligned_for_pitch_scan = (
+                self.last_state.audio_ready
+                and abs(effective_audio_azimuth) <= max(float(params["audio_deadband_deg"]) * 2.0, 15.0)
             )
             audio_seek_can_continue = (
                 self.last_state.mode == DemoMode.AUDIO_SEARCH
@@ -1527,7 +1599,7 @@ class DemoRuntime:
                 and visual_reframe_available
                 and not audio_seek_commanded
                 and not audio_seek_can_continue
-                and audio_recent_for_reframe
+                and (audio_recent_for_reframe or yaw_aligned_for_pitch_scan)
                 and (self._audio_seek_steps >= 1 or visible_acquire_target is not None)
                 and now >= self.motor_guard_until_s
             )

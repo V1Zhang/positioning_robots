@@ -86,21 +86,23 @@ class LocatorStateMachine:
             return False
         if doa_confidence < self.doa_confidence_threshold:
             return False
+        if audio.energy < 0.08:
+            return False
         return True
 
     def _target_is_confirmed(self, target: FaceTarget | None, now_s: float) -> bool:
         if target is None:
             return False
-        if target.speaker_score < self.visual_speaker_threshold:
+        face_height_ratio = float(getattr(target, "face_height_ratio", 0.0))
+        size_evidence = face_height_ratio >= 0.12 or target.area >= 8000.0
+        if target.speaker_score < self.visual_speaker_threshold and not size_evidence:
             return False
-        if target.frontal_score < 0.25:
+        if target.frontal_score < 0.25 and not size_evidence:
             return False
         mouth_evidence = max(target.mouth_motion_score, target.mouth_audio_sync_score)
-        if mouth_evidence < self.mouth_evidence_threshold:
+        if mouth_evidence < self.mouth_evidence_threshold and not size_evidence:
             return False
-        if self._last_audio_s is None:
-            return False
-        return now_s - self._last_audio_s <= self.visual_audio_sync_window_s
+        return True
 
     def update(
         self,

@@ -101,9 +101,13 @@ def choose_active_speaker_target(
             score += 0.18 if direction_matches else -0.18
         scored.append((score, target))
     best_score, best_target = max(scored, key=lambda item: (item[0], item[1].area))
-    if best_score < min_score:
-        return None
-    return best_target
+    if best_score >= min_score:
+        return best_target
+    fallback = max(
+        target_list,
+        key=lambda target: (float(getattr(target, "face_height_ratio", 0.0)), float(target.area), float(target.score)),
+    )
+    return fallback if fallback is not None else None
 
 
 def normalized_center_error(

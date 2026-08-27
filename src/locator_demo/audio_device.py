@@ -75,6 +75,7 @@ class FfmpegAudioLocalizer:
         self._denoise_speech_threshold = 0.35
         self._denoise_energy_threshold = 0.08
         self._human_voice_streak = 0
+        self._max_physical_tdoa_s = 0.00026
         self._recording_enabled = bool(recording_enabled)
         self._recording_chunks: list[bytes] = []
         self._recording_denoised_chunks: list[bytes] = []
@@ -193,6 +194,15 @@ class FfmpegAudioLocalizer:
             balance = (left_level - right_level) / level_sum
             if speech_confidence >= 0.25 and abs(balance) >= 0.30:
                 tdoa = 0.00035 if balance > 0 else -0.00035
+                if abs(tdoa) > self._max_physical_tdoa_s:
+                    return classify_audio_direction(
+                        0.0,
+                        0.0,
+                        min_energy=0.06,
+                        speech_confidence=0.0,
+                        doa_confidence=0.0,
+                        noise_state="invalid_delay",
+                    )
                 return classify_audio_direction(
                     tdoa,
                     min(1.0, energy),
@@ -203,6 +213,15 @@ class FfmpegAudioLocalizer:
                     noise_state=noise_state,
                 )
         srp = srp_phat_front_hemisphere(left, right, sample_rate=self.sample_rate)
+        if abs(srp.tdoa_s) > self._max_physical_tdoa_s:
+            return classify_audio_direction(
+                0.0,
+                0.0,
+                min_energy=0.06,
+                speech_confidence=0.0,
+                doa_confidence=0.0,
+                noise_state="invalid_delay",
+            )
         return classify_audio_direction(
             srp.tdoa_s,
             min(1.0, energy),
@@ -215,13 +234,26 @@ class FfmpegAudioLocalizer:
         )
 
     def _human_voice_double_check(self, raw_estimate: AudioEstimate, denoised_estimate: AudioEstimate) -> AudioEstimate:
-        candidate = denoised_estimate if self._denoise_enabled and self._use_denoised_for_localization else raw_estimate
-        stable_human = (
-            candidate.noise_state == "voiced_speech"
-            and candidate.direction != AudioDirection.UNKNOWN
-            and candidate.speech_confidence >= 0.55
-            and candidate.energy >= 0.10
+        raw_human = (
+            raw_estimate.noise_state in {"voiced_speech", "speech_like"}
+            and raw_estimate.direction != AudioDirection.UNKNOWN
+            and raw_estimate.speech_confidence >= 0.55
+            and raw_estimate.energy >= 0.10
         )
+
+        denoised_human = (
+            denoised_estimate.noise_state in {"voiced_speech", "speech_like"}
+            and denoised_estimate.direction != AudioDirection.UNKNOWN
+            and denoised_estimate.speech_confidence >= 0.35
+            and denoised_estimate.energy >= 0.08
+        )
+
+        if self._denoise_enabled and self._use_denoised_for_localization:
+            stable_human = raw_human and (denoised_human or raw_estimate.speech_confidence >= 0.70)
+            candidate = raw_estimate
+        else:
+            stable_human = raw_human
+            candidate = raw_estimate
 
         if stable_human:
             self._human_voice_streak += 1
@@ -233,7 +265,7 @@ class FfmpegAudioLocalizer:
                 f"[VOICE_DECISION] status=HUMAN_VOICE streak={self._human_voice_streak} "
                 f"direction={candidate.direction.value} speech={candidate.speech_confidence:.3f} "
                 f"energy={candidate.energy:.3f} noise_state={candidate.noise_state} "
-                f"azimuth={candidate.azimuth_deg:.1f}deg"
+                f"azimuth={candidate.azimuth_deg:.1f}deg raw_state={raw_estimate.noise_state} denoised_state={denoised_estimate.noise_state}"
             )
             return candidate
 
@@ -381,7 +413,7 @@ class FfmpegAudioLocalizer:
         with self._lock:
             raw_est = self._latest_raw_estimate
             denoised_est = self._latest_denoised_estimate
-            using = "denoised" if self._denoise_enabled else "raw"
+            using = "raw" if not self._use_denoised_for_localization or not self._denoise_enabled else "denoised"
         return {
             "using_for_downstream": using,
             "raw": self._estimate_to_dict(raw_est),

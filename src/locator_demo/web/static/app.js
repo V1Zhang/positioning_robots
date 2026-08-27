@@ -137,41 +137,42 @@ function drawOverlay(visual) {
     ctx.fillStyle = "#38bdf8";
     ctx.fillText(`body ${(b.score || 0).toFixed(2)}`, b.x1 * sx + 4, b.y1 * sy + 16);
   }
-  const drawFaceBox = (t) => {
-    const locked = Boolean(t.specific_speaker || t.locked);
-    const active = Boolean(t.active_candidate);
-    const tooFar = Boolean(t.too_far);
-    const color = locked ? "#ef4444" : active ? "#22c55e" : tooFar ? "#a3e635" : "#34d399";
+  const drawFaceBox = (t, selected) => {
+    const boxColor = selected ? "#facc15" : "#38bdf8";
+    const borderColor = selected ? "rgba(250,204,21,0.95)" : "rgba(56,189,248,0.8)";
     const controlX = Number.isFinite(t.tracking_x) ? t.tracking_x : (t.x1 + t.x2) / 2;
     const controlY = Number.isFinite(t.tracking_y) ? t.tracking_y : (t.y1 + t.y2) / 2;
     const cx = controlX * sx;
     const cy = controlY * sy;
-    ctx.strokeStyle = color;
-    ctx.lineWidth = locked ? 4 : active ? 3 : 2;
-    ctx.setLineDash(tooFar && !active && !locked ? [6, 4] : []);
+    ctx.strokeStyle = boxColor;
+    ctx.lineWidth = selected ? 4 : 2;
     ctx.strokeRect(t.x1 * sx, t.y1 * sy, (t.x2 - t.x1) * sx, (t.y2 - t.y1) * sy);
-    ctx.setLineDash([]);
-    ctx.fillStyle = color;
+    ctx.fillStyle = boxColor;
     ctx.font = "16px Segoe UI";
-    const score = t.asd_score !== undefined ? t.asd_score : t.active_speaker_score;
-    const tag = locked ? "locked" : active ? "speaking" : tooFar ? "far" : "face";
-    ctx.fillText(`${tag} ${(score || 0).toFixed(2)}`, t.x1 * sx + 4, t.y1 * sy + 18);
-    ctx.strokeStyle = locked || active ? "rgba(250,204,21,0.9)" : "rgba(14,165,233,0.55)";
+    const tag = selected ? "TARGET" : "FACE";
+    ctx.fillText(`${tag} ${((t.x2 - t.x1) * (t.y2 - t.y1)).toFixed(0)}`, t.x1 * sx + 4, t.y1 * sy + 18);
+    ctx.strokeStyle = borderColor;
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(cx, cy);
     ctx.lineTo(aimX, aimY);
     ctx.stroke();
-    ctx.fillStyle = locked || active ? "#facc15" : "#0ea5e9";
+    ctx.fillStyle = boxColor;
     ctx.beginPath();
-    ctx.arc(cx, cy, locked ? 6 : 5, 0, Math.PI * 2);
+    ctx.arc(cx, cy, selected ? 6 : 5, 0, Math.PI * 2);
     ctx.fill();
   };
   const targets = visual.targets || [];
+  const selectedTarget = targets.reduce((best, current) => {
+    if (!best) return current;
+    const bestArea = (best.x2 - best.x1) * (best.y2 - best.y1);
+    const curArea = (current.x2 - current.x1) * (current.y2 - current.y1);
+    return curArea > bestArea ? current : best;
+  }, null);
   if (targets.length > 0) {
-    for (const target of targets) drawFaceBox(target);
+    for (const target of targets) drawFaceBox(target, target === selectedTarget);
   } else if (visual.target) {
-    drawFaceBox(visual.target);
+    drawFaceBox(visual.target, true);
   }
   ctx.lineWidth = 4;
   ctx.strokeStyle = "rgba(15,23,42,0.85)";

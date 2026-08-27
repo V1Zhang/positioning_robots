@@ -108,6 +108,31 @@ class AudioDeviceTests(unittest.TestCase):
         self.assertGreater(estimate.azimuth_deg, 0.0)
         self.assertGreater(estimate.doa_confidence, 0.12)
 
+    def test_raw_direction_is_preferred_when_denoised_confirms_human_voice(self):
+        localizer = FfmpegAudioLocalizer(denoise=True, use_denoised_for_localization=True)
+
+        raw = classify_audio_direction(
+            -0.00035,
+            0.8,
+            min_energy=0.08,
+            speech_confidence=0.8,
+            doa_confidence=0.9,
+            noise_state="voiced_speech",
+        )
+        denoised = classify_audio_direction(
+            0.00035,
+            0.8,
+            min_energy=0.08,
+            speech_confidence=0.8,
+            doa_confidence=0.9,
+            noise_state="voiced_speech",
+        )
+
+        result = localizer._human_voice_double_check(raw, denoised)
+
+        self.assertEqual(result.direction, AudioDirection.LEFT)
+        self.assertEqual(result.noise_state, "voiced_speech")
+
     def test_single_wav_is_written_when_speech_is_located(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             localizer = FfmpegAudioLocalizer(denoise_output_dir=tmpdir, recording_enabled=True)

@@ -26,7 +26,7 @@ class HeadLogicTests(unittest.TestCase):
         logic = HeadControllerLogic()
 
         self.assertEqual(logic.apply_visual_error(HeadPose(1500, 1500), 0.02, 0.0), HeadPose(1500, 1500))
-        self.assertEqual(logic.apply_visual_error(HeadPose(1500, 1500), 0.5, -0.5), HeadPose(1600, 1400))
+        self.assertEqual(logic.apply_visual_error(HeadPose(1500, 1500), 0.5, -0.5), HeadPose(1600, 1600))
 
     def test_visual_error_respects_min_and_max_step_ranges(self):
         logic = HeadControllerLogic()
@@ -44,6 +44,13 @@ class HeadLogicTests(unittest.TestCase):
         )
 
         self.assertEqual(pose, HeadPose(1530, 1475))
+
+    def test_visual_error_corrects_left_right_sign(self):
+        logic = HeadControllerLogic(direction=DirectionConfig(yaw_left_sign=-1, pitch_up_sign=-1))
+
+        pose = logic.apply_visual_error(HeadPose(1500, 1500), -0.5, 0.0, yaw_deadband=0.0, pitch_deadband=0.0)
+
+        self.assertGreater(pose.yaw, 1500)
 
     def test_jogs_with_configured_axis_directions(self):
         logic = HeadControllerLogic(direction=DirectionConfig(yaw_left_sign=1, pitch_up_sign=1, manual_step=80))
@@ -74,7 +81,7 @@ class HeadLogicTests(unittest.TestCase):
 
         self.assertEqual(logic.pose_for_audio_direction("left").yaw, 1700)
         self.assertEqual(logic.pose_for_audio_direction("right").yaw, 1300)
-        self.assertEqual(logic.apply_visual_error(HeadPose(1500, 1500), 0.5, 0.5), HeadPose(1400, 1600))
+        self.assertEqual(logic.apply_visual_error(HeadPose(1500, 1500), 0.5, 0.5), HeadPose(1600, 1600))
 
 
 if __name__ == "__main__":
